@@ -288,16 +288,66 @@ function loadImage(file) {
 
 function canvasToBlob(canvas, mimeType, quality) {
   return new Promise((resolve, reject) => {
-    // Always use toDataURL — it produces files with proper headers
-    // that Windows Photos and other apps accept correctly
     const dataURL = canvas.toDataURL(mimeType, quality);
     const parts = dataURL.split(',');
     const actualMime = parts[0].match(/:(.*?);/)[1];
     const binary = atob(parts[1]);
-    const array = new Uint8Array(binary.length);
+    let array = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) array[i] = binary.charCodeAt(i);
+
+    // Fix JPEG: ensure proper JFIF header with 96 DPI
+    // Windows Photos rejects JPEGs with density 1x1 / aspect ratio
+    if (actualMime === 'image/jpeg') {
+      array = fixJpegDPI(array, 96);
+    }
+
     resolve({ blob: new Blob([array], { type: actualMime }), actualMime });
   });
+}
+
+// Patch JFIF header to set proper DPI (pixels per inch)
+function fixJpegDPI(data, dpi) {
+  // JPEG starts with FF D8, then segments
+  // JFIF APP0 segment: FF E0 [length] "JFIF\0" [version] [units] [Xdensity] [Ydensity]
+  if (data[0] !== 0xFF || data[1] !== 0xD8) return data; // not JPEG
+
+  // Find APP0 JFIF segment
+  if (data[2] === 0xFF && data[3] === 0xE0) {
+    const len = (data[4] << 8) | data[5];
+    // Check "JFIF\0" signature at offset 6
+    if (data[6] === 0x4A && data[7] === 0x46 && data[8] === 0x49 && data[9] === 0x46 && data[10] === 0x00) {
+      // Offset 13: units (0=aspect, 1=dots/inch, 2=dots/cm)
+      // Offset 14-15: X density (big-endian)
+      // Offset 16-17: Y density (big-endian)
+      const patched = new Uint8Array(data);
+      patched[13] = 1; // units = dots per inch
+      patched[14] = (dpi >> 8) & 0xFF;
+      patched[15] = dpi & 0xFF;
+      patched[16] = (dpi >> 8) & 0xFF;
+      patched[17] = dpi & 0xFF;
+      return patched;
+    }
+  }
+
+  // No JFIF APP0 found — insert one after SOI
+  // Build a minimal JFIF APP0 segment
+  const jfif = new Uint8Array([
+    0xFF, 0xE0,       // APP0 marker
+    0x00, 0x10,       // length = 16
+    0x4A, 0x46, 0x49, 0x46, 0x00, // "JFIF\0"
+    0x01, 0x01,       // version 1.1
+    0x01,             // units = dots per inch
+    (dpi >> 8) & 0xFF, dpi & 0xFF, // X density
+    (dpi >> 8) & 0xFF, dpi & 0xFF, // Y density
+    0x00, 0x00        // no thumbnail
+  ]);
+
+  const result = new Uint8Array(2 + jfif.length + data.length - 2);
+  result[0] = 0xFF;
+  result[1] = 0xD8;
+  result.set(jfif, 2);
+  result.set(data.subarray(2), 2 + jfif.length);
+  return result;
 }
 
 async function convertFile(file, format, quality) {
