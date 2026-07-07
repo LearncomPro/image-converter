@@ -106,14 +106,7 @@ input[type=range] { flex: 1; accent-color: #7c5cbf; }
   <div class="actions hidden" id="actions">
     <div class="row">
       <label>Format docelowy:</label>
-      <select id="formatSelect">
-        <option value="jpg">JPG</option>
-        <option value="png">PNG</option>
-        <option value="webp" selected>WebP</option>
-        <option value="bmp">BMP</option>
-        <option value="gif">GIF</option>
-        <option value="ico">ICO</option>
-      </select>
+      <select id="formatSelect"></select>
     </div>
     <div class="row" id="qualityRow">
       <label>Jakość:</label>
@@ -221,7 +214,42 @@ function renderFileList() {
   $('dropLabel').textContent = files.length + ' plik(ów) — kliknij żeby dodać więcej';
 }
 
-// --- Format / quality UI ---
+// --- Detect supported formats ---
+function detectFormats() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  const formats = [
+    { value: 'jpg', label: 'JPG', mime: 'image/jpeg' },
+    { value: 'png', label: 'PNG', mime: 'image/png' },
+    { value: 'webp', label: 'WebP', mime: 'image/webp' },
+    { value: 'bmp', label: 'BMP', mime: 'image/bmp' },
+    { value: 'gif', label: 'GIF', mime: 'image/gif' },
+    { value: 'ico', label: 'ICO', mime: 'image/x-icon' },
+  ];
+  const sel = $('formatSelect');
+  sel.innerHTML = '';
+  for (const fmt of formats) {
+    const dataURL = canvas.toDataURL(fmt.mime);
+    const actualMime = dataURL.split(',')[0].match(/:(.*?);/)[1];
+    const supported = actualMime === fmt.mime || (fmt.value === 'ico' && actualMime === 'image/png');
+    const opt = document.createElement('option');
+    opt.value = fmt.value;
+    if (!supported && fmt.value !== 'ico') {
+      opt.textContent = fmt.label + ' (niedostępny w tej przeglądarce)';
+      opt.disabled = true;
+    } else {
+      opt.textContent = fmt.label;
+    }
+    sel.appendChild(opt);
+  }
+  // Select first enabled
+  for (const opt of sel.options) {
+    if (!opt.disabled) { sel.value = opt.value; break; }
+  }
+  updateQualityVisibility();
+}
+detectFormats();
+
 $('formatSelect').addEventListener('change', updateQualityVisibility);
 $('qualityRange').addEventListener('input', () => {
   $('qualityVal').textContent = $('qualityRange').value + '%';
@@ -260,21 +288,15 @@ function loadImage(file) {
 
 function canvasToBlob(canvas, mimeType, quality) {
   return new Promise((resolve, reject) => {
-    // Use toDataURL for JPG — produces proper JFIF headers that Windows Photos accepts
-    if (mimeType === 'image/jpeg' || mimeType === 'image/webp') {
-      const dataURL = canvas.toDataURL(mimeType, quality);
-      const parts = dataURL.split(',');
-      const mime = parts[0].match(/:(.*?);/)[1];
-      const binary = atob(parts[1]);
-      const array = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) array[i] = binary.charCodeAt(i);
-      resolve(new Blob([array], { type: mime }));
-    } else {
-      canvas.toBlob(blob => {
-        if (blob) resolve(blob);
-        else reject(new Error('Konwersja nie powiodła się'));
-      }, mimeType);
-    }
+    // Always use toDataURL — it produces files with proper headers
+    // that Windows Photos and other apps accept correctly
+    const dataURL = canvas.toDataURL(mimeType, quality);
+    const parts = dataURL.split(',');
+    const actualMime = parts[0].match(/:(.*?);/)[1];
+    const binary = atob(parts[1]);
+    const array = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) array[i] = binary.charCodeAt(i);
+    resolve({ blob: new Blob([array], { type: actualMime }), actualMime });
   });
 }
 
@@ -298,7 +320,7 @@ async function convertFile(file, format, quality) {
   canvas.height = h;
   const ctx = canvas.getContext('2d');
 
-  // JPG doesn't support transparency — fill white background
+  // JPG/BMP don't support transparency — fill white background
   if (format === 'jpg' || format === 'bmp') {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, w, h);
@@ -310,7 +332,15 @@ async function convertFile(file, format, quality) {
   const mimeType = getMimeType(format);
   const q = LOSSY_FORMATS.includes(format) ? quality / 100 : undefined;
 
-  const blob = await canvasToBlob(canvas, mimeType, q);
+  const { blob, actualMime } = await canvasToBlob(canvas, mimeType, q);
+
+  // Check if browser actually produced the requested format
+  // If not (e.g. BMP/GIF not supported), it falls back to PNG
+  if (actualMime !== mimeType && format !== 'ico') {
+    // Browser doesn't support this format natively
+    // Return the PNG blob but flag the actual extension
+    blob._actualFormat = 'png';
+  }
 
   if (!blob) throw new Error('Konwersja nie powiodła się dla: ' + file.name);
 
@@ -344,8 +374,13 @@ $('btnConvert').addEventListener('click', async () => {
       totalNewSize = blob.size;
 
       const baseName = f.name.replace(/\.[^.]+$/, '');
-      outputFileName = baseName + '.' + ext;
+      const actualExt = blob._actualFormat || ext;
+      outputFileName = baseName + '.' + actualExt;
       outputBlob = blob;
+
+      if (blob._actualFormat) {
+        $('status').textContent = 'Uwaga: przeglądarka nie obsługuje formatu ' + format.toUpperCase() + '. Plik zapisano jako ' + actualExt.toUpperCase() + '.';
+      }
     } else {
       // Multiple files — ZIP
       const zip = new JSZip();
@@ -360,7 +395,8 @@ $('btnConvert').addEventListener('click', async () => {
         totalNewSize += blob.size;
 
         const baseName = f.name.replace(/\.[^.]+$/, '');
-        zip.file(baseName + '.' + ext, blob);
+        const actualExt = blob._actualFormat || ext;
+        zip.file(baseName + '.' + actualExt, blob);
       }
 
       $('status').textContent = 'Pakowanie ZIP...';
