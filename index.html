@@ -135,7 +135,6 @@ input[type=range] { flex: 1; accent-color: #7c5cbf; }
       </div>
     </div>
     <button class="btn-download" id="btnDownload">Pobierz</button>
-    <button class="btn-download" id="btnPreview" style="background:#7c5cbf;margin-left:8px;">Podgląd w przeglądarce</button>
   </div>
 </div>
 
@@ -480,12 +479,6 @@ $('btnDownload').addEventListener('click', () => {
   const a = document.createElement('a');
   a.href = url; a.download = outputFileName; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
-});
-
-$('btnPreview').addEventListener('click', () => {
-  if (!outputBlob) return;
-  const url = URL.createObjectURL(outputBlob);
-  window.open(url, '_blank');
 });
 </script>
 </body>
